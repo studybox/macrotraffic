@@ -7,16 +7,22 @@ using Graphs
 #import
 #export
 
-struct Flow{T}
-    id::Int
-    vehicles::Int
-    route::Array{T, 1}
+@with_kw struct Flow
+    routeid::Int
+    roadindex::Int = 0
+    queue::Int = 0
+    arrival1::Int = 0
+    arrival2::DefaultDict = DefaultDict{Int, Int}(0)
+    depart::Int = 0
 end
 
 struct Urban
     id::Int
-    queue::Array{Int, 1}
     storage::Int
+    collection::Dict{Int, Array{Flow,1}}
+    maxstorage::Int
+    delay::Int
+    spdlim::Float64
 end
 struct Freeway
 end
@@ -36,7 +42,7 @@ end
 end
 void_demands = Array{Demand, 1}()
 
-function get_source(demands::Dict{Int, Array{Demand,1}}, junction::Junction)
+function get_source(demands::DefaultDict{Int, Array{Demand,1}}, junction::Junction)
     return demands[Junction.id]
 end
 
@@ -49,7 +55,12 @@ end
 function get_road(network, id)
 end
 function get_flow1(road, did, Qcap)
-    return minimum(road.queue[did] + road.arrive[did], Tu*Qcap)
+    flows = road.collection[did]
+    q = 0
+    for f in flows
+        q += f.queue + f.arrival[0]
+    end
+    return minimum(q, Tu*Qcap)
 end
 function get_capacity(junction, oid, did)
 end
@@ -101,12 +112,107 @@ function update_storage!(road::Road, fs::PriorityQueue, tfs::Int)
         return pq
     end
 end
+
 function update_vehicles!(demand::Array{Demand, 1}, f::PriorityQueue)
     for (idx, d) in enumerate(demand)
         d.vehicles -= f[idx]
         assert(d.vehicles >= 0)
     end
 end
+
+function update_arrival1_and_depart!(road, flows, net)
+    id = road.id
+    for inid in keys(flows)
+        f = flows[inid] # the total number of cars in arrival
+        inroad = get_road(net, inid)
+        ff = inroad.collection[id]
+
+        N = length(ff)
+        res = f % N
+        share = Int(floor(f / N))
+        for (idx, flow) in enumerate(ff)
+            arrival1 = idx <= res ? share+1 : share
+            inroad.collection[id][idx].depart = arrival1
+
+            routeid = flow.routeid
+            roadindex = flow.roadindex
+            route = get_route(net, routeid)
+            update_arrival1!(road, route, routeid, roadindex, arrival1)
+        end
+
+
+
+        #update_depart!(inroad, f)
+        #update_arrival1!(road, ff, f, net)
+    end
+
+end
+
+function update_arrival1!(road, route, routeid, roadindex, arrival1)
+    if length(route) == roadindex
+        nexto = - 1
+    else
+        nexto = route[roadindex+1]
+    end
+    if nexto in road.collection
+        hasroute = false
+        for flow2 in road.collection[nexto]
+            flow2.arrival1 = 0
+            if flow2.routeid == routeid
+                flow2.arrival1 = arrival1
+                hasroute = true
+                break
+            end
+        end
+        if !hasroute
+            push!(road.collection[nexto], Flow(routeid = routeid, roadindex = roadindex+1, arrival1=arrival1))
+        end
+    else
+        road.collection[nexto] = [Flow(routeid = routeid, roadindex = roadindex+1, arrival1=arrival1)]
+    end
+end
+
+function update_arrival!(road, demand, ff, net)
+    for (idx, d) in enumerate(demand)
+        arrival1 = ff[idx]
+        routeid = d.routeid
+        roadindex = 1
+        route = get_route(net, routeid)
+        update_arrival1!(road, route, routeid, roadindex, arrival1)
+    end
+end
+
+function update_storage!(road)
+    for d in keys(road.collection)
+        for f in road.collection[d]
+            road.storage += f.depart
+        end
+    end
+    road.storage = minimum(road.storage, road.maxstorage)
+end
+
+function update_queue!(road)
+    for d in keys(road.collection)
+        for f in road.collection[d]
+            f.queue = max(f.queue + f.arrival2[0] - f.depart , 0)
+        end
+    end
+end
+function update_arrival2!(road)
+    for d in keys(road.collection)
+        for f in road.collection[d]
+            f.arrival2[road.delay] = f.arrival2[road.delay] + f.arrival1
+            # update to next time step
+            new_arrival2 = DefaultDict{Int, Int}(0)
+            for t in keys(f.arrival2)
+                new_arrival2[t-1] = f.arrival2[t]
+            end
+            f.arrival2 = new_arrival2
+        end
+    end
+    road.delay = Int(ceil(road.storage*CARLENGTH/(road.spdlim*Tu)))
+end
+
 function step(network, demands, rng)
     for junction in network.junctions
         for outid in junction.outroads
@@ -120,26 +226,33 @@ function step(network, demands, rng)
             # Must satisfy demand first
             # Compute and update remaining storage
             flows2 = update_storage!(outroad, flows1, totalflows1)
+            update_arrival1!(outroad, demand, flows2, net)
             # update demand if not all satisfied
             update_vehicles!(demand, flows2)
-            pq = Priorityqueue{Int, Int}()
+            flows1 = Priorityqueue{Int, Int}()
+            totalflows1 = 0
             for inid in junction.inroads
                 if is_connected(junction.connections, inid, outid)
                     inroad = get_road(network, inid)
                     Qcap = get_capacity(junction, inid, outid)
-                    flows1 = get_flow1(inroad, outid, Qcap)
-                    enqueue!(pq, inid)
+                    flow1 = get_flow1(inroad, outid, Qcap)
+                    enqueue!(flows1, inid=>flow1)
+                    totalflows1 += flow1
                 end
             end
-            # TODO decide actual flow
-            # TODO update next road
+            # decide actual flow
+            flows2 = update_storage!(outroad, flows1, totalflows1)
+            update_arrival1_and_depart!(outroad, flows2, network)
         end
     end
     for road in network.roads
-        # TODO Update storage
-        # TODO accumulate arrival at link
-        # TODO update arrival at queue
-        # TODO update queue
+        # Update storage
+        update_storage!(road)
+
+        update_queue!(road)
+
+        update_arrival2!(road)
+
     end
 end
 
