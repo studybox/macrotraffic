@@ -156,8 +156,8 @@ function update_arrival1!(road, route, routeid, roadindex, arrival1)
     end
     if nexto in road.collection
         hasroute = false
+
         for flow2 in road.collection[nexto]
-            flow2.arrival1 = 0
             if flow2.routeid == routeid
                 flow2.arrival1 = arrival1
                 hasroute = true
@@ -203,6 +203,7 @@ function update_arrival2!(road)
         for f in road.collection[d]
             f.arrival2[road.delay] = f.arrival2[road.delay] + f.arrival1
             # update to next time step
+            f.arrival1 = 0
             new_arrival2 = DefaultDict{Int, Int}(0)
             for t in keys(f.arrival2)
                 new_arrival2[t-1] = f.arrival2[t]
@@ -254,6 +255,36 @@ function step(network, demands, rng)
         update_arrival2!(road)
 
     end
+end
+
+function build_network(froms, tos, edgeattr, nodeattr)
+    js = []
+    for nodeidx = 1:length(nodeattr)
+        outroads = nodeattr[nodeidx]["outroad"]
+        inroads = nodeattr[nodeidx]["inroad"]
+        cons = nodeattr[nodeidx]["connection"]
+        j = Junction(nodeidx, inroads, outroads, cons)
+        push!(js, j)
+    end
+    es = []
+    for edgeidx = 1:length(froms)
+        if edgeattr[edgeidx]["type"] == "urban"
+            L = edgeattr[edgeidx]["length"]
+            numlane = edgeattr[edgeidx]["lane"]
+            storage = L * numlane / CARLENGTH
+            junction = get_junction(tos[edgeidx])
+            co = Dict{Int, Array{Flow,1}}()
+            for outid in junction.outroads
+                if is_connected(junction.connections, edgeidx, outid)
+                    co[outid] = Flow[]
+                end
+            end
+            spdlim = edgeattr[edgeidx]["spdlim"]
+            e = Urban(edgeidx, storage, co, storage, 1, spdlim)
+            push!(es, e)
+        end
+    end
+    return Network(js, es)
 end
 
 end
