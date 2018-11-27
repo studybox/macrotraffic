@@ -23,6 +23,8 @@ struct Urban
     maxstorage::Int
     delay::Int
     spdlim::Float64
+    length::Float64
+    numlane::Int
 end
 struct Freeway
 end
@@ -30,7 +32,13 @@ struct Ramp
 end
 struct Junction
     id::Int
-    connections::Array{,1}
+    inroads::Array{Int, 1}
+    outroads::Array{Int, 1}
+    connections::Array{Int,1}
+    p::Array{Int, 1} # saturation flow
+    c::Int
+    red::Array{Int, 1} # effective red
+
 end
 
 @with_kw struct Demand
@@ -49,9 +57,11 @@ end
 const Road = Union{Urban, Freeway, Ramp}
 
 struct Network
-    roads::Array{Road, 1}
-    junctions::Array{Junction, 1}
+    roads::SVector
+    junctions::SVector
+    routes::Array{Array{Int, 1}, 1}
 end
+Network(rs::Array, js::Array) = Network(SVector{length(rs)}(rs), SVector{length(js)}(js), Array{Int, 1}[])
 function get_road(network, id)
 end
 function get_flow1(road, did, Qcap)
@@ -219,17 +229,16 @@ function step(network, demands, rng)
         for outid in junction.outroads
             outroad = get_road(network, outid)
             demand = get_source(demands, junction, outid)
-            if length(demand) == 0
-                continue
+            if length(demand) != 0
+                # compute intentions
+                flows1, totalflows1 = create_vehicles!(demand, rng)
+                # Must satisfy demand first
+                # Compute and update remaining storage
+                flows2 = update_storage!(outroad, flows1, totalflows1)
+                update_arrival1!(outroad, demand, flows2, net)
+                # update demand if not all satisfied
+                update_vehicles!(demand, flows2)
             end
-            # compute intentions
-            flows1, totalflows1 = create_vehicles!(demand, rng)
-            # Must satisfy demand first
-            # Compute and update remaining storage
-            flows2 = update_storage!(outroad, flows1, totalflows1)
-            update_arrival1!(outroad, demand, flows2, net)
-            # update demand if not all satisfied
-            update_vehicles!(demand, flows2)
             flows1 = Priorityqueue{Int, Int}()
             totalflows1 = 0
             for inid in junction.inroads
@@ -256,14 +265,19 @@ function step(network, demands, rng)
 
     end
 end
-
+function add_route!(net, route)
+    nothing
+end
 function build_network(froms, tos, edgeattr, nodeattr)
     js = []
     for nodeidx = 1:length(nodeattr)
         outroads = nodeattr[nodeidx]["outroad"]
         inroads = nodeattr[nodeidx]["inroad"]
         cons = nodeattr[nodeidx]["connection"]
-        j = Junction(nodeidx, inroads, outroads, cons)
+        ps = nodeattr[nodeidx]["saturation"]
+        c = nodeattr[nodeidx]["cycle"]
+        rs = nodeattr[nodeidx]["red"]
+        j = Junction(nodeidx, inroads, outroads, cons, ps, c, rs)
         push!(js, j)
     end
     es = []
@@ -271,8 +285,8 @@ function build_network(froms, tos, edgeattr, nodeattr)
         if edgeattr[edgeidx]["type"] == "urban"
             L = edgeattr[edgeidx]["length"]
             numlane = edgeattr[edgeidx]["lane"]
-            storage = L * numlane / CARLENGTH
-            junction = get_junction(tos[edgeidx])
+            storage = Int(floor(L * numlane / CARLENGTH))
+            junction = js[tos[edgeidx]]
             co = Dict{Int, Array{Flow,1}}()
             for outid in junction.outroads
                 if is_connected(junction.connections, edgeidx, outid)
@@ -280,7 +294,7 @@ function build_network(froms, tos, edgeattr, nodeattr)
                 end
             end
             spdlim = edgeattr[edgeidx]["spdlim"]
-            e = Urban(edgeidx, storage, co, storage, 1, spdlim)
+            e = Urban(edgeidx, storage, co, storage, 1, spdlim, L, numlane)
             push!(es, e)
         end
     end
