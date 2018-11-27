@@ -286,5 +286,38 @@ function build_network(froms, tos, edgeattr, nodeattr)
     end
     return Network(js, es)
 end
+function import_network(net::PyObject, info)
+    edgeids = info["edges"]
+    nodeids = info["nodes"]
+    n2id = Dict()
+    for idx = 1:length(nodeids)
+        n2id[nodeids[idx]] = idx
+    end
+    l2id = Dict()
+    for idx = 1:length(edgeids)
+        l2id[edgeids[idx]] = idx
+    end
 
+    for (index, nodeid) in enumerate(nodeids)
+        node = net[:getNode](nodeid)
+        incos = node[:getIncoming]()
+        inroads = []
+        for i in incos
+            l = i[:getID]()
+            if l in edgeids
+                push!(inroads, l2id[l])
+            end
+        end
+        outgos = node[:getOutgoing]()
+        outroads = []
+        for o in outgos
+            l = o[:getID]()
+            if l in edgeids
+                push!(outroads, l2id[l])
+            end
+        end
+        clist = node[:getConnections]()
+        j = Junction(id=index, name=nodeid, jtype=node[:getType]())
+    end
+end
 end
