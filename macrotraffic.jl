@@ -1,13 +1,16 @@
 module macrotraffic
 
+using PyCall
+using DataStructures
 using Distributions
 using StaticArrays
 using Parameters
 using Graphs
-#import
-#export
-
-@with_kw struct Flow
+import Base: show
+export Flow, Urban, Junction, Connection, Demand, Network, import_network
+CARLENGTH = 10
+Tu = 2 #sec
+@with_kw mutable struct Flow
     routeid::Int
     roadindex::Int = 0
     queue::Int = 0
@@ -16,7 +19,7 @@ using Graphs
     depart::Int = 0
 end
 
-struct Urban
+mutable struct Urban
     id::Int
     storage::Int
     collection::Dict{Int, Array{Flow,1}}
@@ -26,43 +29,62 @@ struct Urban
     length::Float64
     numlane::Int
 end
+struct Route
+    id::Int
+    roads::Array{Int, 1}
+    O::Int
+    D::Int
+end
+#=
 struct Freeway
 end
 struct Ramp
 end
+=#
+struct Connection
+    fromEdge::Int
+    toEdge::Int
+    throughlane::Int
+    satflow::Float64
+    direction::String
+    red::Float64
+end
+
 struct Junction
     id::Int
+    name::String
+    jtype::String
     inroads::Array{Int, 1}
     outroads::Array{Int, 1}
-    connections::Array{Int,1}
-    p::Array{Int, 1} # saturation flow
-    c::Int
-    red::Array{Int, 1} # effective red
-
+    connections::Dict{Tuple{Int, Int}, Connection}
+    cycle::Float64
 end
 
-@with_kw struct Demand
-    rate::Int = -1
-    O::Int = -1
-    D::Int = -1
-    routeid::Int = -1
-    vehicles::Int = -1
-end
-void_demands = Array{Demand, 1}()
-
-function get_source(demands::DefaultDict{Int, Array{Demand,1}}, junction::Junction)
-    return demands[Junction.id]
+@with_kw mutable struct Demand
+    rate::Int
+    O::Int
+    D::Int
+    routeid::Int
+    vehicles::Int = 0
 end
 
-const Road = Union{Urban, Freeway, Ramp}
+
+
+
+const Road = Union{Urban}#, Freeway, Ramp}
+
+function get_source(demands::DefaultDict{Tuple{Int, Int}, Array{Demand,1}}, junctionid::Int, outroadid::Int)
+    return demands[(Junctionid, outroadid)]
+end
 
 struct Network
     roads::SVector
     junctions::SVector
-    routes::Array{Array{Int, 1}, 1}
+    routes::Array{Route, 1}
 end
 Network(rs::Array, js::Array) = Network(SVector{length(rs)}(rs), SVector{length(js)}(js), Array{Int, 1}[])
-function get_road(network, id)
+function get_road(net::Network, id::Int)
+    return net.roads[id]
 end
 function get_flow1(road, did, Qcap)
     flows = road.collection[did]
@@ -72,7 +94,14 @@ function get_flow1(road, did, Qcap)
     end
     return minimum(q, Tu*Qcap)
 end
-function get_capacity(junction, oid, did)
+function get_capacity(junction::Junction, oid::Int, did::Int)
+    con = junction.connections[(oid, did)]
+    p = con.satflow # veh/hr
+    r = con.red
+    c = junction.cycle
+    ra = r+10 >= c ? r : r+10
+    Q = p*(c-ra)/c
+    return Q
 end
 function create_vehicles!(demands::Array{Demand, 1}, rng::AbstractRNG)
     pq = Priorityqueue{Int, Int}()
@@ -223,12 +252,26 @@ function update_arrival2!(road)
     end
     road.delay = Int(ceil(road.storage*CARLENGTH/(road.spdlim*Tu)))
 end
-
+function is_connected(junction::Junction, inid::Int, outid::Int)
+    return (inid, outid) in keys(junction.connections)
+end
+function generate_demands(ODs, rates, routes)
+    dd = DefaultDict{Tuple{Int, Int}, Array{Demand, 1}}(Demand[])
+    for (idx, od) in enumerate(ODs)
+        d = Demand(rate=rates[idx], O=od[1], D=od[2], routeid=routes[idx].id)
+        if (od[1], routes[idx].roads[1]) in keys(dd)
+            push!(dd[(od[1], routes[idx].roads[1])] , d)
+        else
+            dd[(od[1], routes[idx].roads[1])] = [d]
+        end
+    end
+    return dd
+end
 function step(network, demands, rng)
     for junction in network.junctions
         for outid in junction.outroads
             outroad = get_road(network, outid)
-            demand = get_source(demands, junction, outid)
+            demand = get_source(demands, junction.id, outid)
             if length(demand) != 0
                 # compute intentions
                 flows1, totalflows1 = create_vehicles!(demand, rng)
@@ -265,8 +308,8 @@ function step(network, demands, rng)
 
     end
 end
-function add_route!(net, route)
-    nothing
+function add_route!(net::Network, route::Route)
+    push!(net.routes, route)
 end
 function build_network(froms, tos, edgeattr, nodeattr)
     js = []
@@ -303,6 +346,7 @@ end
 function import_network(net::PyObject, info)
     edgeids = info["edges"]
     nodeids = info["nodes"]
+    etypes = info["etypes"]
     n2id = Dict()
     for idx = 1:length(nodeids)
         n2id[nodeids[idx]] = idx
@@ -311,7 +355,7 @@ function import_network(net::PyObject, info)
     for idx = 1:length(edgeids)
         l2id[edgeids[idx]] = idx
     end
-
+    js = []
     for (index, nodeid) in enumerate(nodeids)
         node = net[:getNode](nodeid)
         incos = node[:getIncoming]()
@@ -330,8 +374,87 @@ function import_network(net::PyObject, info)
                 push!(outroads, l2id[l])
             end
         end
-        clist = node[:getConnections]()
-        j = Junction(id=index, name=nodeid, jtype=node[:getType]())
+        jtype = node[:getType]()
+        clist = node[:getConnections]() # list of all connections
+        reds = zeros(length(clist))
+        cycle = 10
+        if contains(jtype, "traffic_light")
+            cycle = 0
+            tl = net[:getTLSSecure](nodeid)
+            ps = ((tl[:getPrograms]())["0"])[:getPhases]()
+            for p in ps
+                light = p[1]
+                duration = p[2]
+                cycle += duration
+                for (lidx, l) in enumerate(light)
+                    if l == 'r'
+                        reds[lidx] += duration
+                    elseif l == 's'
+                        reds[lidx] += duration*(2/3)
+                    end
+                end
+            end
+        elseif contains(jtype, "stop")
+            reds = 5*ones(length(clist))
+        end
+
+        cdict = Dict()
+        for (cidx, c) in enumerate(clist)
+            fromEdge = c[:getFrom]()
+            toEdge = c[:getTo]()
+            if fromEdge[:getID]() in edgeids && toEdge[:getID]() in edgeids
+                spdlim = fromEdge[:getSpeed]()
+                fromId = l2id[fromEdge[:getID]()]
+                toId = l2id[toEdge[:getID]()]
+                direction = c[:getDirection]()
+                # Saturation equation S = 990 + 288TL + 8.5SL - 26.8G
+                if (fromId, toId) in keys(cdict)
+                    throughlane = cdict[(fromId, toId)].throughlane + 1
+                    pp = (990 + 288*throughlane + 8.5*spdlim*3.6)*throughlane
+                    if direction == 'r'
+                        pp = pp*2/3
+                    elseif direction == 'l'
+                        pp = pp*2/3
+                    end
+                    cdict[(fromId, toId)] = Connection(fromId, toId, throughlane, pp, direction, reds[cidx]) #vph
+                else
+                    pp = (990 + 288*1 + 8.5*spdlim*3.6) #vph
+                    if direction == 'r'
+                        pp = pp*2/3
+                    elseif direction == 'l'
+                        pp = pp*2/3
+                    end
+                    cdict[(fromId, toId)] = Connection(fromId, toId, 1, pp, direction, reds[cidx])
+                end
+            end
+        end
+        j = Junction(index, nodeid, jtype, inroads, outroads, cdict, cycle)
+        push!(js, j)
     end
+    es = []
+    for (index, edgeid) in enumerate(edgeids)
+        edge = net[:getEdge](edgeid)
+        etype = etypes[index]
+        if etype == "major"
+            L = edge[:getLength]()
+            numlane = length(edge[:getLanes]())
+            storage = Int(floor(L * numlane / CARLENGTH))
+            tonode = edge[:getToNode]()
+            co = Dict{Int, Array{Flow,1}}()
+            for outroad in edge[:getOutgoing]()
+                outroadid = outroad[1][:getID]()
+                if outroadid in edgeids
+                    co[l2id[outroadid]] = Flow[]
+                end
+            end
+            spdlim = edge[:getSpeed]()
+            e = Urban(index, storage, co, storage, 1, spdlim, L, numlane)
+            push!(es, e)
+        end
+    end
+    return Network(es, js)
+end
+function Base.show(io::IO, m::Network)
+    print(io, "A road network")
 end
 end
