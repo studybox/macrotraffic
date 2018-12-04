@@ -6,24 +6,49 @@ using Distributions
 using StaticArrays
 using Parameters
 using Graphs
-import Base: show
-export Flow, Urban, Junction, Connection, Demand, Network, import_network
+
+
+
+import Base: show, step, length
+export Flow,
+       Urban,
+       Freeway,
+       Ramp,
+       Junction,
+       Connection,
+       Demand,
+       Route,
+       Network,
+       import_network,
+       add_route!,
+       step,
+       generate_demands,
+       compute_default_time,
+       compute_time,
+       compute_distance,
+       compute_energy_cost,
+       create_state!,
+       state_step!,
+       get_road
+
 CARLENGTH = 10
 Tu = 2 #sec
 @with_kw mutable struct Flow
     routeid::Int
     roadindex::Int = 0
-    queue::Int = 0
-    arrival1::Int = 0
-    arrival2::DefaultDict = DefaultDict{Int, Int}(0)
-    depart::Int = 0
+    queue::Float64 = 0
+    arrival1::Float64 = 0
+    arrival2::DefaultDict = DefaultDict{Int, Float64}(0.0)
+    depart::Float64 = 0
 end
 
 mutable struct Urban
     id::Int
-    storage::Int
+    O::Int
+    D::Int
+    storage::Float64
     collection::Dict{Int, Array{Flow,1}}
-    maxstorage::Int
+    maxstorage::Float64
     delay::Int
     spdlim::Float64
     length::Float64
@@ -35,12 +60,32 @@ struct Route
     O::Int
     D::Int
 end
-#=
-struct Freeway
+
+mutable struct Freeway
+    id::Int
+    O::Int
+    D::Int
+    storage::Float64
+    collection::Dict{Int, Array{Flow,1}}
+    maxstorage::Float64
+    delay::Int
+    spdlim::Float64
+    length::Float64
+    numlane::Int
 end
-struct Ramp
+mutable struct Ramp
+    id::Int
+    O::Int
+    D::Int
+    storage::Float64
+    collection::Dict{Int, Array{Flow,1}}
+    maxstorage::Float64
+    delay::Int
+    spdlim::Float64
+    length::Float64
+    numlane::Int
 end
-=#
+
 struct Connection
     fromEdge::Int
     toEdge::Int
@@ -61,72 +106,78 @@ struct Junction
 end
 
 @with_kw mutable struct Demand
-    rate::Int
+    rate::Float64
     O::Int
     D::Int
     routeid::Int
-    vehicles::Int = 0
+    vehicles::Float64 = 0
 end
 
 
 
 
-const Road = Union{Urban}#, Freeway, Ramp}
+const Road = Union{Urban, Freeway, Ramp}
 
 function get_source(demands::DefaultDict{Tuple{Int, Int}, Array{Demand,1}}, junctionid::Int, outroadid::Int)
-    return demands[(Junctionid, outroadid)]
+    return demands[(junctionid, outroadid)]
 end
 
 struct Network
     roads::SVector
     junctions::SVector
+    n2id::Dict{String, Int}
+    l2id::Dict{String, Int}
     routes::Array{Route, 1}
 end
-Network(rs::Array, js::Array) = Network(SVector{length(rs)}(rs), SVector{length(js)}(js), Array{Int, 1}[])
+Network(rs::Array, js::Array, n2id::Dict, l2id::Dict) = Network(SVector{length(rs)}(rs), SVector{length(js)}(js), n2id, l2id, Array{Int, 1}[])
 function get_road(net::Network, id::Int)
     return net.roads[id]
 end
 function get_flow1(road, did, Qcap)
     flows = road.collection[did]
-    q = 0
+    q = 0.0
     for f in flows
-        q += f.queue + f.arrival[0]
+        q += f.queue + f.arrival2[0]
     end
-    return minimum(q, Tu*Qcap)
+    return min(q, Tu*Qcap)
 end
 function get_capacity(junction::Junction, oid::Int, did::Int)
+    if did == -1
+        return 1.0
+    end
     con = junction.connections[(oid, did)]
     p = con.satflow # veh/hr
     r = con.red
     c = junction.cycle
     ra = r+10 >= c ? r : r+10
-    Q = p*(c-ra)/c
+    Q = p*(c-ra)/c/3600
+    #println("Cap of ", oid, " to ", did, " is: ", Tu*Q)
     return Q
 end
 function create_vehicles!(demands::Array{Demand, 1}, rng::AbstractRNG)
-    pq = Priorityqueue{Int, Int}()
+    pq = PriorityQueue{Int, Float64}()
     totalf = 0
     for (idx, d) in enumerate(demands)
         f = create_vehicles!(d, rng)
         enqueue!(pq, idx=>f)
         totalf += f
     end
-    return (f, totalf)
+    return (pq, totalf)
 end
 function create_vehicles!(demand::Demand, rng::AbstractRNG)
     u = Poisson(Tu*demand.rate)
-    newveh = rand(u, rng)
+    newveh = rand(u)
     demand.vehicles += newveh
     return demand.vehicles
 end
 
-function update_storage!(road::Road, fs::PriorityQueue, tfs::Int)
+function update_storage!(road::Road, fs::PriorityQueue, tf::Float64)
 
     if tf <= road.storage
         road.storage -= tf
         return fs
     else
-        pq = Priorityqueue{Int, Int}()
+        pq = PriorityQueue{Int, Float64}()
         N = length(fs)
         for i = 1:N
             (idx, f) = peek(fs)
@@ -134,20 +185,27 @@ function update_storage!(road::Road, fs::PriorityQueue, tfs::Int)
                 road.storage -= f
                 enqueue!(pq, idx=>f)
             else
-                q = Int(floor(road.storage/(N-i+1)))
+                #println("storage: ", road.storage)
+                #println("N: ", N-i+1)
+                #res = road.storage % (N-i+1)
+                #println("res: ", res)
+                share = road.storage / (N-i+1)
+                #println("share: ", share)
+                fff = 0
                 for (ii, idx2) in enumerate(keys(fs))
-                    if ii != N-i+1
-                        enqueue!(pq, idx2=>q)
-                    else
-                        qq = road.storage - q*(N-i)
-                        enqueue!(pq, idx2=>qq)
-                    end
+                    q = share
+                    fff+=q
+                    enqueue!(pq, idx2=>q)
                 end
+                #println("No more room for demands")
+
+                assert(abs(fff - road.storage)<1e-6)
                 road.storage = 0
                 break
             end
             dequeue!(fs)
         end
+
         return pq
     end
 end
@@ -167,10 +225,13 @@ function update_arrival1_and_depart!(road, flows, net)
         ff = inroad.collection[id]
 
         N = length(ff)
-        res = f % N
-        share = Int(floor(f / N))
+        if N == 0
+            break
+        end
+        #res = f % N
+        share = f / N
         for (idx, flow) in enumerate(ff)
-            arrival1 = idx <= res ? share+1 : share
+            arrival1 = share
             inroad.collection[id][idx].depart = arrival1
 
             routeid = flow.routeid
@@ -186,32 +247,36 @@ function update_arrival1_and_depart!(road, flows, net)
     end
 
 end
-
+length(route::Route) = length(route.roads)
 function update_arrival1!(road, route, routeid, roadindex, arrival1)
     if length(route) == roadindex
         nexto = - 1
     else
-        nexto = route[roadindex+1]
+        nexto = route.roads[roadindex+1]
     end
-    if nexto in road.collection
+    #println(nexto)
+    if nexto in keys(road.collection)
         hasroute = false
 
         for flow2 in road.collection[nexto]
             if flow2.routeid == routeid
-                flow2.arrival1 = arrival1
+                flow2.arrival1 += arrival1
                 hasroute = true
                 break
             end
         end
         if !hasroute
-            push!(road.collection[nexto], Flow(routeid = routeid, roadindex = roadindex+1, arrival1=arrival1))
+            push!(road.collection[nexto], Flow(routeid = routeid, roadindex = nexto == -1 ? -1:roadindex+1, arrival1=arrival1))
         end
     else
-        road.collection[nexto] = [Flow(routeid = routeid, roadindex = roadindex+1, arrival1=arrival1)]
+        road.collection[nexto] = [Flow(routeid = routeid, roadindex = nexto == -1 ? -1:roadindex+1, arrival1=arrival1)]
     end
 end
 
-function update_arrival!(road, demand, ff, net)
+function get_route(net, routeid)
+    return net.routes[routeid]
+end
+function update_arrival1!(road, demand, ff, net)
     for (idx, d) in enumerate(demand)
         arrival1 = ff[idx]
         routeid = d.routeid
@@ -219,21 +284,30 @@ function update_arrival!(road, demand, ff, net)
         route = get_route(net, routeid)
         update_arrival1!(road, route, routeid, roadindex, arrival1)
     end
+    #println("arrival1 : ", road.collection)
 end
 
 function update_storage!(road)
     for d in keys(road.collection)
-        for f in road.collection[d]
-            road.storage += f.depart
+        if d == -1
+            for f in road.collection[d]
+                road.storage += f.arrival2[0]
+            end
+        else
+            for f in road.collection[d]
+                road.storage += f.depart
+            end
         end
     end
-    road.storage = minimum(road.storage, road.maxstorage)
+    road.storage = min(road.storage, road.maxstorage)
 end
 
 function update_queue!(road)
     for d in keys(road.collection)
-        for f in road.collection[d]
-            f.queue = max(f.queue + f.arrival2[0] - f.depart , 0)
+        if d != -1
+            for f in road.collection[d]
+                f.queue = max(f.queue + f.arrival2[0] - f.depart , 0.0)
+            end
         end
     end
 end
@@ -243,14 +317,20 @@ function update_arrival2!(road)
             f.arrival2[road.delay] = f.arrival2[road.delay] + f.arrival1
             # update to next time step
             f.arrival1 = 0
-            new_arrival2 = DefaultDict{Int, Int}(0)
+            new_arrival2 = DefaultDict{Int, Float64}(0.0)
             for t in keys(f.arrival2)
-                new_arrival2[t-1] = f.arrival2[t]
+                if t-1 >= 0
+                    new_arrival2[t-1] = f.arrival2[t]
+                end
             end
             f.arrival2 = new_arrival2
         end
     end
-    road.delay = Int(ceil(road.storage*CARLENGTH/(road.spdlim*Tu)))
+    if typeof(road) == Freeway
+        road.delay = Int(ceil(road.storage*1.5*CARLENGTH/(road.spdlim*Tu*(road.numlane/4+0.75))))
+    else
+        road.delay = Int(ceil(road.storage*CARLENGTH/(road.spdlim*Tu*road.numlane)))
+    end
 end
 function is_connected(junction::Junction, inid::Int, outid::Int)
     return (inid, outid) in keys(junction.connections)
@@ -275,17 +355,19 @@ function step(network, demands, rng)
             if length(demand) != 0
                 # compute intentions
                 flows1, totalflows1 = create_vehicles!(demand, rng)
+                #println("flows2 in demands: ", flows1)
                 # Must satisfy demand first
                 # Compute and update remaining storage
                 flows2 = update_storage!(outroad, flows1, totalflows1)
-                update_arrival1!(outroad, demand, flows2, net)
+                #println("flows2 in act demands: ", flows2)
+                update_arrival1!(outroad, demand, flows2, network)
                 # update demand if not all satisfied
                 update_vehicles!(demand, flows2)
             end
-            flows1 = Priorityqueue{Int, Int}()
-            totalflows1 = 0
+            flows1 = PriorityQueue{Int, Float64}()
+            totalflows1 = 0.0
             for inid in junction.inroads
-                if is_connected(junction.connections, inid, outid)
+                if is_connected(junction, inid, outid)
                     inroad = get_road(network, inid)
                     Qcap = get_capacity(junction, inid, outid)
                     flow1 = get_flow1(inroad, outid, Qcap)
@@ -308,8 +390,35 @@ function step(network, demands, rng)
 
     end
 end
+function add_route!(net::Network, route::Array{String,1})
+    O = net.roads[net.l2id[route[1]]].O
+    D = net.roads[net.l2id[route[end]]].D
+    ll = []
+    for r in route
+        l = net.l2id[r]
+        push!(ll, l)
+    end
+    id = length(net.routes)+1
+    route = Route(id, ll, O, D)
+    add_route!(net, route)
+end
 function add_route!(net::Network, route::Route)
     push!(net.routes, route)
+
+    roadIds = route.roads
+    for (idx, rid) in enumerate(roadIds)
+        if idx == length(roadIds)
+            nexto = -1
+        else
+            nexto = roadIds[idx+1]
+        end
+        road = get_road(net, rid)
+        if nexto in keys(road.collection)
+            push!(road.collection[nexto], Flow(routeid = route.id, roadindex = nexto == -1 ? -1:idx+1))
+        else
+            road.collection[nexto] = [Flow(routeid = route.id, roadindex = nexto == -1 ? -1:idx+1)]
+        end
+    end
 end
 function build_network(froms, tos, edgeattr, nodeattr)
     js = []
@@ -332,7 +441,7 @@ function build_network(froms, tos, edgeattr, nodeattr)
             junction = js[tos[edgeidx]]
             co = Dict{Int, Array{Flow,1}}()
             for outid in junction.outroads
-                if is_connected(junction.connections, edgeidx, outid)
+                if is_connected(junction, edgeidx, outid)
                     co[outid] = Flow[]
                 end
             end
@@ -379,6 +488,7 @@ function import_network(net::PyObject, info)
         reds = zeros(length(clist))
         cycle = 10
         if contains(jtype, "traffic_light")
+
             cycle = 0
             tl = net[:getTLSSecure](nodeid)
             ps = ((tl[:getPrograms]())["0"])[:getPhases]()
@@ -387,6 +497,14 @@ function import_network(net::PyObject, info)
                 duration = p[2]
                 cycle += duration
                 for (lidx, l) in enumerate(light)
+                    #=
+                    if index == 23
+                        println("Nodeid: ", nodeid)
+                        println("lights: ", light)
+                        println("l: ", l)
+                        println("is red?: ", l == 'r')
+                    end
+                    =#
                     if l == 'r'
                         reds[lidx] += duration
                     elseif l == 's'
@@ -394,37 +512,63 @@ function import_network(net::PyObject, info)
                     end
                 end
             end
-        elseif contains(jtype, "stop")
+
+        elseif contains(jtype, "allway_stop")
             reds = 5*ones(length(clist))
         end
 
         cdict = Dict()
+        fltdset = Set()
         for (cidx, c) in enumerate(clist)
             fromEdge = c[:getFrom]()
+            fromLane = c[:getFromLane]()
             toEdge = c[:getTo]()
+            stateid = c[:getTLLinkIndex]() + 1
+            if stateid <= 0
+                stateid = cidx
+            end
             if fromEdge[:getID]() in edgeids && toEdge[:getID]() in edgeids
                 spdlim = fromEdge[:getSpeed]()
+
                 fromId = l2id[fromEdge[:getID]()]
+                fromLaneId = fromLane[:getID]()
                 toId = l2id[toEdge[:getID]()]
+                if etypes[fromId] == "ramp" && etypes[toId] == "expressway"
+                    spdlim = 29.06
+                end
+
+                if etypes[fromId] == "expressway" && etypes[toId] == "ramp"
+                    spdlim = 17.88
+                end
+
                 direction = c[:getDirection]()
+                fltd = (fromLaneId,direction)
                 # Saturation equation S = 990 + 288TL + 8.5SL - 26.8G
                 if (fromId, toId) in keys(cdict)
-                    throughlane = cdict[(fromId, toId)].throughlane + 1
-                    pp = (990 + 288*throughlane + 8.5*spdlim*3.6)*throughlane
-                    if direction == 'r'
-                        pp = pp*2/3
-                    elseif direction == 'l'
-                        pp = pp*2/3
+                    if !(fltd in fltdset)
+                        throughlane = cdict[(fromId, toId)].throughlane + 1
+                        pp = (990 + 288*throughlane + 8.5*spdlim*3.6)*throughlane
+                        if direction == 'r'
+                            pp = pp*2/3
+                        elseif direction == 'l'
+                            pp = pp*2/3
+                        end
+
+                        cdict[(fromId, toId)] = Connection(fromId, toId, throughlane, pp, direction, reds[stateid]) #vph
                     end
-                    cdict[(fromId, toId)] = Connection(fromId, toId, throughlane, pp, direction, reds[cidx]) #vph
                 else
+                    push!(fltdset, fltd)
                     pp = (990 + 288*1 + 8.5*spdlim*3.6) #vph
                     if direction == 'r'
                         pp = pp*2/3
                     elseif direction == 'l'
                         pp = pp*2/3
                     end
-                    cdict[(fromId, toId)] = Connection(fromId, toId, 1, pp, direction, reds[cidx])
+                    #if (fromId, toId) == (46, 47)
+                        #println(cidx)
+                        #println(reds[cidx])
+                    #end
+                    cdict[(fromId, toId)] = Connection(fromId, toId, 1, pp, direction, reds[stateid])
                 end
             end
         end
@@ -433,12 +577,16 @@ function import_network(net::PyObject, info)
     end
     es = []
     for (index, edgeid) in enumerate(edgeids)
-        edge = net[:getEdge](edgeid)
         etype = etypes[index]
-        if etype == "major"
+        if etype == "MAJOR"
+            edge = net[:getEdge](edgeid)
             L = edge[:getLength]()
+            Oname = edge[:getFromNode]()[:getID]()
+            Dname = edge[:getToNode]()[:getID]()
+            O = n2id[Oname]
+            D = n2id[Dname]
             numlane = length(edge[:getLanes]())
-            storage = Int(floor(L * numlane / CARLENGTH))
+            storage = L * numlane / CARLENGTH
             tonode = edge[:getToNode]()
             co = Dict{Int, Array{Flow,1}}()
             for outroad in edge[:getOutgoing]()
@@ -448,13 +596,88 @@ function import_network(net::PyObject, info)
                 end
             end
             spdlim = edge[:getSpeed]()
-            e = Urban(index, storage, co, storage, 1, spdlim, L, numlane)
+            delay = Int(ceil(storage*CARLENGTH/(spdlim*Tu*numlane)))
+            e = Urban(index, O, D, storage, co, storage, delay, spdlim, L, numlane)
+            push!(es, e)
+        elseif etype == "EXPRESSWAY"
+            edge = net[:getEdge](edgeid)
+            L = edge[:getLength]()
+            Oname = edge[:getFromNode]()[:getID]()
+            Dname = edge[:getToNode]()[:getID]()
+            O = n2id[Oname]
+            D = n2id[Dname]
+            numlane = length(edge[:getLanes]())
+
+            storage = L/ (CARLENGTH*1.5) + (L*(numlane-1)*0.25/(CARLENGTH*1.5))
+            tonode = edge[:getToNode]()
+            co = Dict{Int, Array{Flow,1}}()
+            for outroad in edge[:getOutgoing]()
+                outroadid = outroad[1][:getID]()
+                if outroadid in edgeids
+                    co[l2id[outroadid]] = Flow[]
+                end
+            end
+            #spdlim = edge[:getSpeed]()
+            spdlim = 31.29
+            delay = Int(ceil(L/(spdlim*Tu)))
+            e = Freeway(index, O, D, storage, co, storage, delay, spdlim, L, numlane)
+            push!(es, e)
+        elseif etype == "RAMP" || etype == "COLLECTOR"
+            edge = net[:getEdge](edgeid)
+            L = edge[:getLength]()
+            Oname = edge[:getFromNode]()[:getID]()
+            Dname = edge[:getToNode]()[:getID]()
+            O = n2id[Oname]
+            D = n2id[Dname]
+            numlane = length(edge[:getLanes]())
+            storage = L * numlane / CARLENGTH
+            tonode = edge[:getToNode]()
+            co = Dict{Int, Array{Flow,1}}()
+            for outroad in edge[:getOutgoing]()
+                outroadid = outroad[1][:getID]()
+                if outroadid in edgeids
+                    co[l2id[outroadid]] = Flow[]
+                end
+            end
+            #spdlim = edge[:getSpeed]()
+            spdlim = 17.88
+            delay = Int(ceil(storage*CARLENGTH/(spdlim*Tu*numlane)))
+            e = Ramp(index, O, D, storage, co, storage, delay, spdlim, L, numlane)
             push!(es, e)
         end
     end
-    return Network(es, js)
+    return Network(es, js, n2id, l2id)
+end
+function Base.show(io::IO, r::Road)
+    println(io, "id: ", r.id)
+    println(io, "O-D: ", r.O, " ", r.D)
+    println(io, "storage: ", r.storage, "veh")
+    println(io, "Time to Queue: ", r.delay*Tu, "s")
+    for (outrid, flows) in r.collection
+        println(io, "Flows to road ", outrid, ":")
+        for f in flows
+            Base.show(io, f)
+        end
+    end
+end
+function Base.show(io::IO, f::Flow)
+    println(io, "    routeid: ", f.routeid)
+    println(io, "    queue: ", f.queue, "veh")
+    println(io, "    arrival: ", f.arrival2[0], "veh")
+    aa = 0
+    for (t, a) in f.arrival2
+        aa += a
+    end
+    println(io, "    future arrivals: ", aa, "veh")
+    println(io, "    departure: ", f.depart, "veh")
 end
 function Base.show(io::IO, m::Network)
     print(io, "A road network")
 end
+
+
+include("rewards.jl")
+include("createstate.jl")
+include("visualization.jl")
+
 end
