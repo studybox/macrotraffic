@@ -1,4 +1,4 @@
-module marcoDTA
+module jointDTA
 
 using macrotraffic
 using POMDPs

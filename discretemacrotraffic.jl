@@ -1,4 +1,4 @@
-module macrotraffic
+module discretemacrotraffic
 
 using PyCall
 using DataStructures
@@ -6,9 +6,6 @@ using Distributions
 using StaticArrays
 using Parameters
 using Graphs
-
-
-
 import Base: show, step, length
 export Flow,
        Urban,
@@ -22,36 +19,25 @@ export Flow,
        import_network,
        add_route!,
        step,
-       generate_demands,
-       compute_default_time,
-       compute_time,
-       compute_time2,
-       compute_distance,
-       compute_energy_cost,
-       compute_energy_cost2,
-       compute_energy_rate,
-       create_state!,
-       state_step!,
-       get_road
-
-CARLENGTH = 7.5
+       generate_demands
+CARLENGTH = 10
 Tu = 2 #sec
 @with_kw mutable struct Flow
     routeid::Int
     roadindex::Int = 0
-    queue::Float64 = 0
-    arrival1::Float64 = 0
-    arrival2::DefaultDict = DefaultDict{Int, Float64}(0.0)
-    depart::Float64 = 0
+    queue::Int = 0
+    arrival1::Int = 0
+    arrival2::DefaultDict = DefaultDict{Int, Int}(0)
+    depart::Int = 0
 end
 
 mutable struct Urban
     id::Int
     O::Int
     D::Int
-    storage::Float64
+    storage::Int
     collection::Dict{Int, Array{Flow,1}}
-    maxstorage::Float64
+    maxstorage::Int
     delay::Int
     spdlim::Float64
     length::Float64
@@ -68,9 +54,9 @@ mutable struct Freeway
     id::Int
     O::Int
     D::Int
-    storage::Float64
+    storage::Int
     collection::Dict{Int, Array{Flow,1}}
-    maxstorage::Float64
+    maxstorage::Int
     delay::Int
     spdlim::Float64
     length::Float64
@@ -80,9 +66,9 @@ mutable struct Ramp
     id::Int
     O::Int
     D::Int
-    storage::Float64
+    storage::Int
     collection::Dict{Int, Array{Flow,1}}
-    maxstorage::Float64
+    maxstorage::Int
     delay::Int
     spdlim::Float64
     length::Float64
@@ -113,7 +99,7 @@ end
     O::Int
     D::Int
     routeid::Int
-    vehicles::Float64 = 0
+    vehicles::Int = 0
 end
 
 
@@ -138,16 +124,13 @@ function get_road(net::Network, id::Int)
 end
 function get_flow1(road, did, Qcap)
     flows = road.collection[did]
-    q = 0.0
+    q = 0
     for f in flows
         q += f.queue + f.arrival2[0]
     end
-    return min(q, Tu*Qcap)
+    return min(q, Int(ceil(Tu*Qcap)))
 end
 function get_capacity(junction::Junction, oid::Int, did::Int)
-    if did == -1
-        return 1.0
-    end
     con = junction.connections[(oid, did)]
     p = con.satflow # veh/hr
     r = con.red
@@ -155,10 +138,11 @@ function get_capacity(junction::Junction, oid::Int, did::Int)
     ra = r+10 >= c ? r : r+10
     Q = p*(c-ra)/c/3600
     #println("Cap of ", oid, " to ", did, " is: ", Tu*Q)
+
     return Q
 end
 function create_vehicles!(demands::Array{Demand, 1}, rng::AbstractRNG)
-    pq = PriorityQueue{Int, Float64}()
+    pq = PriorityQueue{Int, Int}()
     totalf = 0
     for (idx, d) in enumerate(demands)
         f = create_vehicles!(d, rng)
@@ -174,13 +158,13 @@ function create_vehicles!(demand::Demand, rng::AbstractRNG)
     return demand.vehicles
 end
 
-function update_storage!(road::Road, fs::PriorityQueue, tf::Float64)
+function update_storage!(road::Road, fs::PriorityQueue, tf::Int)
 
     if tf <= road.storage
         road.storage -= tf
         return fs
     else
-        pq = PriorityQueue{Int, Float64}()
+        pq = PriorityQueue{Int, Int}()
         N = length(fs)
         for i = 1:N
             (idx, f) = peek(fs)
@@ -190,19 +174,19 @@ function update_storage!(road::Road, fs::PriorityQueue, tf::Float64)
             else
                 #println("storage: ", road.storage)
                 #println("N: ", N-i+1)
-                #res = road.storage % (N-i+1)
+                res = road.storage % (N-i+1)
                 #println("res: ", res)
-                share = road.storage / (N-i+1)
+                share = Int(floor(road.storage / (N-i+1)))
                 #println("share: ", share)
                 fff = 0
                 for (ii, idx2) in enumerate(keys(fs))
-                    q = share
+                    q = ii > (N-i+1)-res ? share+1 : share
                     fff+=q
                     enqueue!(pq, idx2=>q)
                 end
                 #println("No more room for demands")
 
-                assert(abs(fff - road.storage)<1e-6)
+                assert(fff == road.storage)
                 road.storage = 0
                 break
             end
@@ -231,10 +215,10 @@ function update_arrival1_and_depart!(road, flows, net)
         if N == 0
             break
         end
-        #res = f % N
-        share = f / N
+        res = f % N
+        share = Int(floor(f / N))
         for (idx, flow) in enumerate(ff)
-            arrival1 = share
+            arrival1 = idx <= res ? share+1 : share
             inroad.collection[id][idx].depart = arrival1
 
             routeid = flow.routeid
@@ -269,10 +253,10 @@ function update_arrival1!(road, route, routeid, roadindex, arrival1)
             end
         end
         if !hasroute
-            push!(road.collection[nexto], Flow(routeid = routeid, roadindex = nexto == -1 ? -1:roadindex+1, arrival1=arrival1))
+            push!(road.collection[nexto], Flow(routeid = routeid, roadindex = roadindex+1, arrival1=arrival1))
         end
     else
-        road.collection[nexto] = [Flow(routeid = routeid, roadindex = nexto == -1 ? -1:roadindex+1, arrival1=arrival1)]
+        road.collection[nexto] = [Flow(routeid = routeid, roadindex = roadindex+1, arrival1=arrival1)]
     end
 end
 
@@ -309,7 +293,7 @@ function update_queue!(road)
     for d in keys(road.collection)
         if d != -1
             for f in road.collection[d]
-                f.queue = max(f.queue + f.arrival2[0] - f.depart , 0.0)
+                f.queue = max(f.queue + f.arrival2[0] - f.depart , 0)
             end
         end
     end
@@ -320,7 +304,7 @@ function update_arrival2!(road)
             f.arrival2[road.delay] = f.arrival2[road.delay] + f.arrival1
             # update to next time step
             f.arrival1 = 0
-            new_arrival2 = DefaultDict{Int, Float64}(0.0)
+            new_arrival2 = DefaultDict{Int, Int}(0)
             for t in keys(f.arrival2)
                 if t-1 >= 0
                     new_arrival2[t-1] = f.arrival2[t]
@@ -330,7 +314,7 @@ function update_arrival2!(road)
         end
     end
     if typeof(road) == Freeway
-        road.delay = Int(ceil(road.storage*1.0*CARLENGTH/(road.spdlim*Tu*(road.numlane/4+0.75))))
+        road.delay = Int(ceil(road.storage*1.5*CARLENGTH/(road.spdlim*Tu*(road.numlane/4+0.75))))
     else
         road.delay = Int(ceil(road.storage*CARLENGTH/(road.spdlim*Tu*road.numlane)))
     end
@@ -367,8 +351,8 @@ function step(network, demands, rng)
                 # update demand if not all satisfied
                 update_vehicles!(demand, flows2)
             end
-            flows1 = PriorityQueue{Int, Float64}()
-            totalflows1 = 0.0
+            flows1 = PriorityQueue{Int, Int}()
+            totalflows1 = 0
             for inid in junction.inroads
                 if is_connected(junction, inid, outid)
                     inroad = get_road(network, inid)
@@ -407,20 +391,6 @@ function add_route!(net::Network, route::Array{String,1})
 end
 function add_route!(net::Network, route::Route)
     push!(net.routes, route)
-    roadIds = route.roads
-    for (idx, rid) in enumerate(roadIds)
-        if idx == length(roadIds)
-            nexto = -1
-        else
-            nexto = roadIds[idx+1]
-        end
-        road = get_road(net, rid)
-        if nexto in keys(road.collection)
-            push!(road.collection[nexto], Flow(routeid = route.id, roadindex = nexto == -1 ? -1:idx+1))
-        else
-            road.collection[nexto] = [Flow(routeid = route.id, roadindex = nexto == -1 ? -1:idx+1)]
-        end
-    end
 end
 function build_network(froms, tos, edgeattr, nodeattr)
     js = []
@@ -551,9 +521,9 @@ function import_network(net::PyObject, info)
                         throughlane = cdict[(fromId, toId)].throughlane + 1
                         pp = (990 + 288*throughlane + 8.5*spdlim*3.6)*throughlane
                         if direction == 'r'
-                            pp = pp*2.8/3
+                            pp = pp*2/3
                         elseif direction == 'l'
-                            pp = pp*2.8/3
+                            pp = pp*2/3
                         end
 
                         cdict[(fromId, toId)] = Connection(fromId, toId, throughlane, pp, direction, reds[stateid]) #vph
@@ -562,14 +532,14 @@ function import_network(net::PyObject, info)
                     push!(fltdset, fltd)
                     pp = (990 + 288*1 + 8.5*spdlim*3.6) #vph
                     if direction == 'r'
-                        pp = pp*2.8/3
+                        pp = pp*2/3
                     elseif direction == 'l'
-                        pp = pp*2.8/3
+                        pp = pp*2/3
                     end
-                    #if (fromId, toId) == (46, 47)
-                        #println(cidx)
-                        #println(reds[cidx])
-                    #end
+                    if (fromId, toId) == (46, 47)
+                        println(cidx)
+                        println(reds[cidx])
+                    end
                     cdict[(fromId, toId)] = Connection(fromId, toId, 1, pp, direction, reds[stateid])
                 end
             end
@@ -588,7 +558,7 @@ function import_network(net::PyObject, info)
             O = n2id[Oname]
             D = n2id[Dname]
             numlane = length(edge[:getLanes]())
-            storage = L * numlane / CARLENGTH
+            storage = Int(floor(L * numlane / CARLENGTH))
             tonode = edge[:getToNode]()
             co = Dict{Int, Array{Flow,1}}()
             for outroad in edge[:getOutgoing]()
@@ -610,7 +580,7 @@ function import_network(net::PyObject, info)
             D = n2id[Dname]
             numlane = length(edge[:getLanes]())
 
-            storage = L/ (CARLENGTH*1.0) + (L*(numlane-1)*0.25/(CARLENGTH*1.0))
+            storage = Int(floor(L/ (CARLENGTH*1.5))) + Int(floor(L*(numlane-1)*0.25/(CARLENGTH*1.5)))
             tonode = edge[:getToNode]()
             co = Dict{Int, Array{Flow,1}}()
             for outroad in edge[:getOutgoing]()
@@ -619,8 +589,7 @@ function import_network(net::PyObject, info)
                     co[l2id[outroadid]] = Flow[]
                 end
             end
-            #spdlim = edge[:getSpeed]()
-            spdlim = 31.29
+            spdlim = edge[:getSpeed]()
             delay = Int(ceil(L/(spdlim*Tu)))
             e = Freeway(index, O, D, storage, co, storage, delay, spdlim, L, numlane)
             push!(es, e)
@@ -632,7 +601,7 @@ function import_network(net::PyObject, info)
             O = n2id[Oname]
             D = n2id[Dname]
             numlane = length(edge[:getLanes]())
-            storage = L * numlane / CARLENGTH
+            storage = Int(floor(L * numlane / CARLENGTH))
             tonode = edge[:getToNode]()
             co = Dict{Int, Array{Flow,1}}()
             for outroad in edge[:getOutgoing]()
@@ -641,8 +610,7 @@ function import_network(net::PyObject, info)
                     co[l2id[outroadid]] = Flow[]
                 end
             end
-            #spdlim = edge[:getSpeed]()
-            spdlim = 17.88
+            spdlim = edge[:getSpeed]()
             delay = Int(ceil(storage*CARLENGTH/(spdlim*Tu*numlane)))
             e = Ramp(index, O, D, storage, co, storage, delay, spdlim, L, numlane)
             push!(es, e)
@@ -676,10 +644,40 @@ end
 function Base.show(io::IO, m::Network)
     print(io, "A road network")
 end
-
-
-include("rewards.jl")
-include("createstate.jl")
-include("visualization.jl")
-
 end
+#=
+edgesid = edgeid
+LL = []
+numlane = []
+storage = 0
+co = Dict{Int, Array{Flow,1}}()
+for (eidx, eid) in enumerate(edgesid)
+    edge = net[:getEdge](eid)
+    L  = edge[:getLength]()
+    nl = length(edge[:getLanes]())
+    push!(LL, L)
+    push!(numlane, nl)
+    if eidx == 1
+        Oname = edge[:getFromNode]()[:getID]()
+        O = n2id[Oname]
+        storage += Int(floor(L/CARLENGTH))+Int(floor(L*(numlane-1)*0.5/CARLENGTH))
+        spdlim = edge[:getSpeed]()
+    elseif eidx == length(edgesid)
+        Dname = edge[:getToNode]()[:getID]()
+        D = n2id[Dname]
+        storage += Int(floor(L/ CARLENGTH))
+        tonode = edge[:getToNode]()
+        for outroad in edge[:getOutgoing]()
+            outroadid = outroad[1][:getID]()
+            if outroadid in edgeids
+                co[l2id[outroadid]] = Flow[]
+            end
+        end
+    else
+        storage += Int(floor(L/CARLENGTH))+Int(floor(L*(numlane-1)*0.5/CARLENGTH))
+    end
+end
+delay = Int(ceil(storage*CARLENGTH/(spdlim*Tu*numlane)))
+e = Freeway(index, O, D, storage, co, storage, delay, spdlim, LL, numlane)
+push!(es, e)
+=#
