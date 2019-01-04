@@ -76,7 +76,9 @@ struct DTAstate
 end
 
 struct DTAaction
-    assign :: Float64
+    e::Int
+    nodeidx::Int
+    #assign :: Vector{Float64}
 end
 
 #=
@@ -89,17 +91,50 @@ struct DTAobservation
     urban :: Float64
 end
 
-@with_kw immutable DTAMDP <: MDP{DTAstate, DTAaction}
-    maxstep::Int = 13
-    lambda::Float64 = 0.8
-    fastest::Float64 = 0.5
-    connected::Float64 = 0.5
-    capacities::Float64= 100
-    tau::Float64 = 5*60
-    omega::Float64 = 40
-    discount::Float64 = 0.999999999
+immutable DTAMDP <: MDP{DTAstate, DTAaction}
+    maxstep::Int # = 13
+    lambdas::Vector{Float64}# = [0.8]
+    fastest::Float64# = 0.5
+    connected::Float64# = 0.5
+    tau::Float64# = 5*60
+    omega::Float64# = 40
+    discount::Float64# = 0.999999999
+    E::Int# = 1
+    numagents::Int# = 1
+    joint_actions::Vector{Vector{DTAaction}}
+    joint_action_groups::Vector{Vector{Int}}
+    joint_state_groups::Vector{Vector{Int}}
+    elimination_order::Vector{Int}
 
+    function DTAMDP(maxstep::Int,
+                    lambdas::Vector{Float64},
+                    fastest::Float64,
+                    connected::Float64,
+                    tau::Float64,
+                    omega::Float64,
+                    discount::Float64,
+                    E::Int, numagents::Int,
+                    joint_action_groups::Vector{Vector{Int}},
+                    joint_state_groups::Vector{Vector{Int}},
+                    elimination_order::Vector{Int})
+        joint_actions = generate_joint_actions(joint_action_groups, E, numagents)
+        return new(
+                maxstep,
+                lambdas,
+                fastest,
+                connected,
+                tau,
+                omega,
+                discount,
+                E, numagents,
+                joint_actions,
+                joint_action_groups,
+                joint_state_groups,
+                elimination_order
+        )
+    end
 end
+
 @with_kw immutable DTAPOMDP <: POMDP{DTAstate, DTAaction, DTAobservation}
     mdp ::DTAMDP = DTAMDP()
     obs_std::Float64 = 0.5
@@ -109,6 +144,53 @@ const DTAProblem = Union{DTAMDP, DTAPOMDP}
 
 mdp(p::DTAPOMDP) = p.mdp
 mdp(p::DTAMDP) = p
+
+function generate_joint_actions(joint_action_groups, E, numagents)
+    joint_actions = []
+    for i = 1:E
+        jj = []
+        na  = length(joint_action_groups[i])
+        for j = 1:11^na
+            ja = DTAaction(i, j)
+            push!(jj, ja)
+        end
+        push!(joint_actions, jj)
+    end
+    return joint_actions
+end
+function generate_actions(pp::DTAProblem)
+    p = mdp(pp)
+    a = []
+    dimensions = Tuple([0:10 for i=1:numagents])
+    for i = 1:11^p.numagents
+        a = ind2sub(dimensions, i)
+        a = [i for i in a]
+        jas = []
+        for e,j in enumerate(p.joint_action_groups)
+            ja = a[j]
+            d = Tuple([0:10 for i=1:length(j)])
+            nodeidx = sub2ind(d,ja)
+            joint = DTA(e,nodeidx)
+            push!(jas, joint)
+        end
+        push!(a, jas)
+    end
+end
+function generate_orders(pp::DTAProblem)
+    p = mdp(pp)
+    eo = pp.elimination_order
+    groups = deepcopy(pp.joint_action_groups)
+    used = zeros(length(groups))
+    for idxo, o in enumerate(eo)
+        agents = []
+        for idxaa, aa in enumerate(groups)
+            if used[idxaa] != 0 && o in aa
+                append!(agents, aa)
+            end
+        end
+    end
+end
+
 
 
 
