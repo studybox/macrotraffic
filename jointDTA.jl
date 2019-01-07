@@ -160,10 +160,10 @@ function generate_joint_actions(joint_action_groups, E, numagents)
 end
 function generate_actions(pp::DTAProblem)
     p = mdp(pp)
-    a = []
+    A = []
     dimensions = Tuple([0:10 for i=1:numagents])
-    for i = 1:11^p.numagents
-        a = ind2sub(dimensions, i)
+    for ii = 1:11^p.numagents
+        a = ind2sub(dimensions, ii)
         a = [i for i in a]
         jas = []
         for e,j in enumerate(p.joint_action_groups)
@@ -173,7 +173,7 @@ function generate_actions(pp::DTAProblem)
             joint = DTA(e,nodeidx)
             push!(jas, joint)
         end
-        push!(a, jas)
+        push!(A, jas)
     end
 end
 function generate_orders(pp::DTAProblem)
@@ -181,14 +181,57 @@ function generate_orders(pp::DTAProblem)
     eo = pp.elimination_order
     groups = deepcopy(pp.joint_action_groups)
     used = zeros(length(groups))
+    retO = []
+    retJ = []
     for idxo, o in enumerate(eo)
-        agents = []
+        newjointid = length(groups)+1
+        agentids = []
+        jointids = []
         for idxaa, aa in enumerate(groups)
             if used[idxaa] != 0 && o in aa
-                append!(agents, aa)
+                append!(agentids, aa)
+                push!(jointids, idxaa)
+                used[idxaa] = 1
             end
         end
+        agentids = sort(unique(agentids))
+        newjointgroup = filter!(e->e≠o, agentids)
+        push!(groups, newjointgroup)
+        push!(used, 0)
+        dim = Tuple([0:10 for i=1:length(agentids)])
+        Odict = Dict()
+        Jlist = []
+        for ii = 1:11^length(agentids)
+            agentacts = ind2sub(dimensions, ii)
+            jointacts = []
+            nodeidxs = []
+            for e in jointids
+                jindexs = []
+                for ag in groups[e]
+                    push!(jindexs, findfirst(agentids, ag))
+                end
+                ja = agentacts[jindexs]
+                d = Tuple([0:10 for i=1:length(jindexs)])
+                nodeidx = sub2ind(d,ja)
+                push!(nodeidxs, nodeidx)
+                joint = DTA(e,nodeidx)
+                push!(jointacts, joint)
+            end
+            push!(Jlist, jointacts)
+            newjindexs = []
+            for ag in newjointgroup
+                push!(newjindexs, findfirst(agentids, ag))
+            end
+            newja = agentacts[newjindexs]
+            newd = Tuple([0:10 for i=1:length(newjindexs)])
+            newnodeidx = sub2ind(newd, newja)
+            #newjoint = DTA(newjointid, newnodeidx)
+            Odict[jointacts] = (newd, newnodeidx)
+        end
+        push!(retO, Odict)
+        push!(retJ, Jlist)
     end
+    return (retO, retJ)
 end
 
 
