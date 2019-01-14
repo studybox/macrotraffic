@@ -67,7 +67,7 @@ import ParticleFilters: obs_weight
 importall POMDPs
 import Base: rand
 
-export DTAstate, DTAaction, DTAobservation, DTAMDP, DTAPOMDP, mdp, obs_weight, ObsAdaptiveParticleFilter, generate_sr, isterminal, baseline_action, baseline_action2, actions
+export DTAstate, DTAaction, DTAobservation, DTAMDP, DTAPOMDP, mdp, obs_weight, ObsAdaptiveParticleFilter, generate_sr, isterminal, baseline_action, baseline_action2, actions, generate_actions, generate_orders
 
 struct DTAstate
     step::Int
@@ -75,12 +75,12 @@ struct DTAstate
     urban::Float64
 end
 
-struct DTAaction
+struct DTAjoint
     e::Int
     nodeidx::Int
     #assign :: Vector{Float64}
 end
-
+const DTAaction = Union{DTAjoint, Vector{DTAjoint}}
 #=
 struct DTAaction
     assign :: Float64
@@ -93,33 +93,35 @@ end
 
 immutable DTAMDP <: MDP{DTAstate, DTAaction}
     maxstep::Int # = 13
+    actiondev::Int
     lambdas::Vector{Float64}# = [0.8]
     fastest::Float64# = 0.5
     connected::Float64# = 0.5
-    tau::Float64# = 5*60
+    tau::Int# = 5*60
     omega::Float64# = 40
     discount::Float64# = 0.999999999
     E::Int# = 1
     numagents::Int# = 1
     joint_actions::Vector{Vector{DTAaction}}
     joint_action_groups::Vector{Vector{Int}}
-    joint_state_groups::Vector{Vector{Int}}
+    joint_state_groups::Vector{Dict{Vector{Int},Vector{Int}}}
     elimination_order::Vector{Int}
 
-    function DTAMDP(maxstep::Int,
-                    lambdas::Vector{Float64},
-                    fastest::Float64,
-                    connected::Float64,
-                    tau::Float64,
-                    omega::Float64,
-                    discount::Float64,
-                    E::Int, numagents::Int,
-                    joint_action_groups::Vector{Vector{Int}},
-                    joint_state_groups::Vector{Vector{Int}},
-                    elimination_order::Vector{Int})
-        joint_actions = generate_joint_actions(joint_action_groups, E, numagents)
+    function DTAMDP(;maxstep::Int=13, actiondev::Int=11,
+                    lambdas::Vector{Float64}=[0.8,0.8,0.8],
+                    fastest::Float64=0.5,
+                    connected::Float64=0.5,
+                    tau::Int=300,
+                    omega::Float64=40.0,
+                    discount::Float64=0.9999999,
+                    E::Int=2, numagents::Int=3,
+                    joint_action_groups::Vector{Vector{Int}}=[[1,2],[2,3]],
+                    joint_state_groups::Vector{Dict{Vector{Int},Vector{Int}}}=[Dict([1,1]=>[1,2,3],[2,2]=>[3,4,5]),Dict([1,1]=>[2,3,4],[2,2]=>[4,5,6])],
+                    elimination_order::Vector{Int}=[1,3,2])
+        joint_actions = generate_joint_actions(joint_action_groups, E, numagents, actiondev)
         return new(
                 maxstep,
+                actiondev,
                 lambdas,
                 fastest,
                 connected,
@@ -142,16 +144,18 @@ end
 
 const DTAProblem = Union{DTAMDP, DTAPOMDP}
 
+
+
 mdp(p::DTAPOMDP) = p.mdp
 mdp(p::DTAMDP) = p
 
-function generate_joint_actions(joint_action_groups, E, numagents)
+function generate_joint_actions(joint_action_groups, E, numagents, actiondev)
     joint_actions = []
     for i = 1:E
         jj = []
         na  = length(joint_action_groups[i])
-        for j = 1:11^na
-            ja = DTAaction(i, j)
+        for j = 1:actiondev^na
+            ja = DTAjoint(i, j)
             push!(jj, ja)
         end
         push!(joint_actions, jj)
@@ -160,49 +164,65 @@ function generate_joint_actions(joint_action_groups, E, numagents)
 end
 function generate_actions(pp::DTAProblem)
     p = mdp(pp)
-    A = []
-    dimensions = Tuple([0:10 for i=1:numagents])
-    for ii = 1:11^p.numagents
+    A = DTAaction[]
+    dimensions = Tuple([0:p.actiondev-1 for i=1:p.numagents])
+    for ii = 1:p.actiondev^p.numagents
         a = ind2sub(dimensions, ii)
+        #println(a)
         a = [i for i in a]
-        jas = []
-        for e,j in enumerate(p.joint_action_groups)
+        jas = DTAjoint[]
+        for (e,j) in enumerate(p.joint_action_groups)
+            #println(j)
             ja = a[j]
-            d = Tuple([0:10 for i=1:length(j)])
-            nodeidx = sub2ind(d,ja)
-            joint = DTA(e,nodeidx)
+            #println(ja)
+            d = Tuple([0:p.actiondev-1 for i=1:length(j)])
+            #println(d)
+            nodeidx = sub2ind(d,ja...)
+            #println(nodeidx)
+            joint = DTAjoint(e,nodeidx)
             push!(jas, joint)
         end
         push!(A, jas)
     end
+    A
 end
 function generate_orders(pp::DTAProblem)
     p = mdp(pp)
-    eo = pp.elimination_order
-    groups = deepcopy(pp.joint_action_groups)
+    eo = p.elimination_order
+    groups = deepcopy(p.joint_action_groups)
     used = zeros(length(groups))
     retO = []
     retJ = []
-    for idxo, o in enumerate(eo)
+    for (idxo, o) in enumerate(eo)
         newjointid = length(groups)+1
         agentids = []
         jointids = []
-        for idxaa, aa in enumerate(groups)
-            if used[idxaa] != 0 && o in aa
+        for (idxaa, aa) in enumerate(groups)
+            if used[idxaa] == 0 && o in aa
                 append!(agentids, aa)
                 push!(jointids, idxaa)
                 used[idxaa] = 1
             end
         end
         agentids = sort(unique(agentids))
-        newjointgroup = filter!(e->e≠o, agentids)
+        #println(agentids)
+        newjointgroup = filter(e->e≠o, agentids)
+        #println(agentids)
         push!(groups, newjointgroup)
         push!(used, 0)
-        dim = Tuple([0:10 for i=1:length(agentids)])
+        dim = Tuple([0:p.actiondev-1 for i=1:length(agentids)])
+        #println(dim)
         Odict = Dict()
         Jlist = []
-        for ii = 1:11^length(agentids)
-            agentacts = ind2sub(dimensions, ii)
+        for ii = 1:p.actiondev^length(agentids)
+            if length(dim) > 1
+
+                agentacts = ind2sub(dim, ii)
+                agentacts = [i for i in agentacts]
+
+            else
+                agentacts = [ii-1]
+            end
             jointacts = []
             nodeidxs = []
             for e in jointids
@@ -211,10 +231,14 @@ function generate_orders(pp::DTAProblem)
                     push!(jindexs, findfirst(agentids, ag))
                 end
                 ja = agentacts[jindexs]
-                d = Tuple([0:10 for i=1:length(jindexs)])
-                nodeidx = sub2ind(d,ja)
+                d = Tuple([0:p.actiondev-1 for i=1:length(jindexs)])
+                if length(jindexs) > 1
+                    nodeidx = sub2ind(d,ja...)
+                else
+                    nodeidx = ja[1]+1
+                end
                 push!(nodeidxs, nodeidx)
-                joint = DTA(e,nodeidx)
+                joint = DTAjoint(e,nodeidx)
                 push!(jointacts, joint)
             end
             push!(Jlist, jointacts)
@@ -223,15 +247,25 @@ function generate_orders(pp::DTAProblem)
                 push!(newjindexs, findfirst(agentids, ag))
             end
             newja = agentacts[newjindexs]
-            newd = Tuple([0:10 for i=1:length(newjindexs)])
-            newnodeidx = sub2ind(newd, newja)
-            #newjoint = DTA(newjointid, newnodeidx)
-            Odict[jointacts] = (newd, newnodeidx)
+            if length(newjindexs) > 1
+                newd = Tuple([0:p.actiondev-1 for i=1:length(newjindexs)])
+                newnodeidx = sub2ind(newd, newja...)
+
+            elseif length(newjindexs) == 1
+                newnodeidx = newja[1]+1
+
+            else
+                newnodeidx = -jointids[1]
+            end
+
+            #newjoint = DTAjoint(newjointid, newnodeidx)
+            #Odict[jointacts] = (newjointid, newnodeidx)
+            Odict[nodeidxs] = (newjointid, newnodeidx)
         end
         push!(retO, Odict)
         push!(retJ, Jlist)
     end
-    return (retO, retJ)
+    return (retO, retJ, groups)
 end
 
 
