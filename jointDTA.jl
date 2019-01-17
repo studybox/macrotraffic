@@ -80,7 +80,7 @@ struct DTAjoint
     nodeidx::Int
     #assign :: Vector{Float64}
 end
-const DTAaction = Union{DTAjoint, Vector{DTAjoint}}
+const DTAaction = Vector{DTAjoint}
 #=
 struct DTAaction
     assign :: Float64
@@ -102,7 +102,7 @@ immutable DTAMDP <: MDP{DTAstate, DTAaction}
     discount::Float64# = 0.999999999
     E::Int# = 1
     numagents::Int# = 1
-    joint_actions::Vector{Vector{DTAaction}}
+    joint_actions::Vector{DTAaction}
     joint_action_groups::Vector{Vector{Int}}
     joint_state_groups::Vector{Dict{Vector{Int},Vector{Int}}}
     elimination_order::Vector{Int}
@@ -186,6 +186,7 @@ function generate_actions(pp::DTAProblem)
     end
     A
 end
+
 function generate_orders(pp::DTAProblem)
     p = mdp(pp)
     eo = p.elimination_order
